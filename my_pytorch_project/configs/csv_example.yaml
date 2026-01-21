@@ -1,0 +1,16 @@
+csv_path: data/raw/example_regression.csv
+x_cols:
+  - x1
+  - x2
+y_col: y
+
+input_dim: 2
+hidden_dim: 8
+output_dim: 1
+
+lr: 0.01
+epochs: 50
+batch_size: 16
+seed: 0
+val_ratio: 0.2
+device: cpu
