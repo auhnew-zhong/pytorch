@@ -9,6 +9,8 @@ using namespace mlir::ai;
 namespace {
 
 struct AISimplifyPass : public PassWrapper<AISimplifyPass, OperationPass<ModuleOp>> {
+  StringRef getArgument() const final { return "ai-simplify"; }
+  StringRef getDescription() const final { return "Simplify ai dialect operations"; }
   void runOnOperation() override {}
 };
 
@@ -17,6 +19,6 @@ struct AISimplifyPass : public PassWrapper<AISimplifyPass, OperationPass<ModuleO
 std::unique_ptr<Pass> mlir::ai::createAISimplifyPass() { return std::make_unique<AISimplifyPass>(); }
 
 void mlir::ai::registerAIPasses() {
-  PassRegistration<AISimplifyPass>("ai-simplify", "Simplify ai dialect operations");
+  static PassRegistration<AISimplifyPass> reg;
+  (void)reg;
 }
-

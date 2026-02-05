@@ -7,14 +7,17 @@ except ImportError:
 
 
 def ir_to_mlir_and_compile(ir_graph: IRGraph, target: str = "cpu"):
+    """Serialize the IR graph and invoke the C++ MLIR backend."""
     if _mlir_backend is None:
         raise RuntimeError("MLIR backend extension is not available")
+    # Convert Python IR objects into a pure-Python dict for pybind transfer.
     serialized = serialize_ir_graph(ir_graph)
     handle = _mlir_backend.compile_from_serialized_ir(serialized, target)
     return handle
 
 
 def serialize_ir_graph(ir_graph: IRGraph) -> dict:
+    """Serialize IRGraph into a dict schema consumable by the C++ side."""
     data = {
         "inputs": [],
         "outputs": [],
@@ -34,4 +37,3 @@ def serialize_ir_graph(ir_graph: IRGraph) -> dict:
             }
         )
     return data
-

@@ -2,9 +2,9 @@
 
 ## 0. 一句话总结
 
-这是一个“从 PyTorch FX 图到自定义 IR，再到 MLIR/LLVM IR”的最小骨架工程：Python 侧负责捕获与 IR 构建/优化，C++ 侧提供 MLIR Dialect/Pass/Pipeline，并通过 pybind 暴露 `_ai_compiler_mlir.compile_from_serialized_ir` 接口给 Python 调用。
+这是一个“从 PyTorch FX 图到自定义 IR，再到 MLIR 文本”的最小骨架工程：Python 侧负责捕获与 IR 构建/优化，C++ 侧提供 MLIR Dialect/Pass/Pipeline，并通过 pybind 暴露 `_ai_compiler_mlir.compile_from_serialized_ir` 接口给 Python 调用。
 
-当前实现更接近“脚手架/教学 Demo”：C++ 侧编译函数目前不消费传入的序列化 IR，而是构造一个空 `ModuleOp`，跑一个空实现的 pass 后导出 LLVM IR 字符串。
+当前实现仍是“脚手架/教学 Demo”，但 C++ 侧已会消费传入的序列化 IR：会解析 inputs/nodes/outputs，构建 `func.func @main` 与多个 callee 函数，并将连线关系以 `func.call` 的形式体现在 MLIR 里。
 
 ---
 
@@ -28,16 +28,16 @@
 
 ---
 
-## 2. 端到端数据流：从 PyTorch 到 LLVM IR
+## 2. 端到端数据流：从 PyTorch 到 MLIR 文本
 
 顶层入口函数是 `ai_compiler.compile_torch_model`：
 - [compile_torch_model](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/python/ai_compiler/__init__.py#L7-L12)
 
 流水线（当前版本）：
 
-1) **FX 捕获**：`torch.fx.symbolic_trace(model)`  
-   - 实现：[capture_fx_graph](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/python/ai_compiler/frontend/fx_capture.py#L1-L7)
-   - 输出：`torch.fx.GraphModule`
+1) **FX 捕获**：`torch.fx.symbolic_trace(model)` + `ShapeProp`  
+   - 实现：[capture_fx_graph](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/python/ai_compiler/frontend/fx_capture.py#L1-L12)
+   - 输出：`torch.fx.GraphModule`，并填充 `node.meta['tensor_meta']`（用于后续 dtype/shape 推导）
 
 2) **FX -> 自定义 IR**：遍历 `graph_module.graph.nodes`，构造 `IRGraph/IRNode/IRValue`  
    - 实现：[build_ir_from_fx](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/python/ai_compiler/frontend/ir_builder.py#L5-L57)
@@ -55,8 +55,8 @@
 
 5) **调用 C++ 扩展编译**：`_ai_compiler_mlir.compile_from_serialized_ir(serialized, target)`  
    - Python 侧入口：[ir_to_mlir_and_compile](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/python/ai_compiler/backend/mlir_export.py#L9-L14)
-   - C++ 侧入口：[compileFromSerializedIr](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/cpp/lib/PyBind.cpp#L21-L51)
-   - 当前返回值：LLVM IR 的字符串（`std::string llvmIR`）
+   - C++ 侧入口：[compileFromSerializedIr](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/cpp/lib/PyBind.cpp#L23-L213)
+   - 当前返回值：MLIR 文本字符串（`std::string mlirText`）
 
 ---
 
@@ -74,7 +74,7 @@
 
 ### 3.2 前端：FX 捕获（当前最简）
 
-`capture_fx_graph` 只做 `fx.symbolic_trace(model)`，对 `example_inputs` 只做了 tuple/list 规范化，但没有用它做 `concrete_args` 或形状相关推导。
+`capture_fx_graph` 做 `fx.symbolic_trace(model)` 后会用 `ShapeProp` 结合 `example_inputs` 进行形状推导，将结果写入 `node.meta`。
 
 这意味着：
 - 能捕获到的算子集合取决于 `symbolic_trace` 的能力与模型结构
@@ -130,13 +130,13 @@
 - [PYBIND11_MODULE](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/cpp/lib/PyBind.cpp#L53-L55)
 
 `compile_from_serialized_ir(ir, target)` 当前行为：
-- 参数 `ir/target` 被显式忽略：`(void)ir; (void)target;`
-- 创建 `MLIRContext`，加载 `AIDialect`，注册 LLVM dialect translation
-- 创建空 `ModuleOp`
-- 跑 pass pipeline（只跑空实现 pass）
-- 直接把空 module translate 到 LLVM IR 并返回字符串
+- 解析 `inputs/nodes/outputs` 并生成 MLIR 类型
+- 创建 `func.func @main`，将 inputs 作为 block 参数
+- 为每个 op 生成私有 callee func，并在 main 中用 `func.call` 表达连线关系
+- 跑 pass pipeline（当前仍为空实现）
+- 返回 MLIR 文本字符串
 
-所以：当前“编译结果”主要用于验证 C++/MLIR pipeline 与 Python 绑定是否连通，而不是一个真正的 Torch->MLIR 编译器实现。
+所以：当前“编译结果”主要用于验证“序列化 IR -> MLIR 文本”的连通性与可视化结构，而不是完整的 Torch->MLIR lowering。
 
 ---
 
@@ -155,10 +155,9 @@
 
 ### 5.2 重要提示：当前 CMake 更像“最小链接示例”
 
-`cpp/CMakeLists.txt` 用 `add_library(ai_compiler ...)` 构建一个库并链接 MLIR 与 Python，但它没有：
-- 显式引入 pybind11 include dirs（如果系统/MLIR 没提供，编译会失败）
-- 把目标构建为 Python 扩展模块（通常需要 MODULE 类型、正确的后缀、或使用 `pybind11_add_module`）
-- 安装/打包 Python 包（`python/` 目录没有 `setup.py/pyproject.toml`）
+`cpp/CMakeLists.txt` 已改为构建 Python 扩展模块（`MODULE` + `pybind11::module`），并显式引入 MLIR/LLVM include dirs。仍然缺少：
+- Python 包安装/打包（`python/` 目录没有 `setup.py/pyproject.toml`）
+- 一键构建脚本（需要手动配置 MLIR/LLVM 与 pybind11 的路径）
 
 因此更合理的定位是：这里展示了“如何把 MLIR + pybind 粘起来”，但距离一键构建/可 pip 安装还有工程化工作要补。
 
@@ -181,9 +180,9 @@
 
 按实现优先级给一个可落地路线：
 
-1) **让 C++ 侧消费序列化 IR**
-   - 在 [PyBind.cpp](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/cpp/lib/PyBind.cpp) 中解析 `SerializedIR`
-   - 把 `ir_graph.nodes` lowering 成 MLIR ops（先用 builtin/arith/linalg 等现成 dialect 也行）
+1) **把 C++ 侧生成的 MLIR 从“函数调用骨架”扩展到具体算子**
+   - 在 [PyBind.cpp](file:///home/auhnewzhong/pytorch/pytorch-mlir-compiler/cpp/lib/PyBind.cpp) 中为常见 op 建立真实 MLIR op
+   - 增加最小的 dialect/type 规则，避免大量使用 fallback type
 
 2) **完善类型/形状系统**
    - Python IR 层做 dtype/shape 推导，或把推导放到 MLIR 的 type system
@@ -213,10 +212,9 @@ class M(torch.nn.Module):
 
 
 model = M()
-llvm_ir = compile_torch_model(model, (torch.randn(2, 3), torch.randn(2, 3)))
-print(type(llvm_ir))
-print(llvm_ir[:200])
+mlir_text = compile_torch_model(model, (torch.randn(2, 3), torch.randn(2, 3)))
+print(type(mlir_text))
+print(mlir_text[:200])
 ```
 
-当前你应该把返回值理解为“MLIR pipeline 是否能跑通”的验证信号，而不是最终可执行产物。
-
+当前你应该把返回值理解为“序列化 IR 是否成功转成 MLIR 文本”的验证信号，而不是最终可执行产物。
